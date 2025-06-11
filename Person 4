@@ -1,12 +1,15 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include "esp_camera.h"
 #include "time.h"
 #include <ArduinoJson.h>
 #include <ESP32Servo.h>
+#include <PubSubClient.h>
+
 
 const char* ssid = "Galaxy A34";         // Replace "xxx" with your WiFi SSID
 const char* password = "*********";     // Replace "xxx" with your WiFi Password
@@ -18,9 +21,17 @@ String apiKey = "8HCjViTFqEZT";             // Replace "xxx" with your API key
 // Firebase Configuration
 const char* firebaseHost = "iot-smart-parking-45de5-default-rtdb.firebaseio.com";  // Without "https://"
 const char* firebaseAuth = "AIzaSyDPphCm-HiZp5UDYlh2x5GBAPdDQDzQxc8";  // Use Database Secret for Admin access
-
-// Firebase path
 String firebasePath = "/Parking/ReservedRegion/PlateDetected.json";
+
+// --- ThingsBoard ---
+const char* tbHost = "thingsboard.cloud";
+const char* tbToken = "HfDMuUqPQKWnqxI02Vhc";
+const int mqttPort = 1883;
+
+// MQTT
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+WiFiClientSecure client; // Secure client for HTTPS communication
 
 //NTP Server Configuration
 const char* ntpServer = "pool.ntp.org";
@@ -43,7 +54,7 @@ Servo gateServo;
 
 #define flashLight 4      // GPIO pin for the flashlight
 int count = 0;           // Counter for image uploads
-WiFiClientSecure client; // Secure client for HTTPS communication
+
 // Camera GPIO pins - adjust based on your ESP32-CAM board
 #define PWDN_GPIO_NUM 32
 #define RESET_GPIO_NUM -1
@@ -112,6 +123,54 @@ void sendPlateToFirebase(const String& plateNumber) {
   firebaseClient.stop();
 }
 
+void sendPlateToThingsBoard(const String& plate) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = "http://" + String(tbHost) + "/api/v1/" + tbToken + "/telemetry";
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    String payload = "{\"plateNumber\":\"" + plate + "\"}";
+    int httpCode = http.POST(payload);
+    Serial.println("Sent to ThingsBoard. Response: " + String(httpCode));
+    http.end();
+  }
+}
+
+void handleMqttCommands(char* topic, byte* payload, unsigned int length) {
+  StaticJsonDocument<256> json;
+  DeserializationError error = deserializeJson(json, payload, length);
+
+  if (error) {
+    Serial.println("❌ Failed to parse MQTT command");
+    return;
+  }
+
+  String method = json["method"];
+  bool param = json["params"];
+
+  Serial.println("🔔 MQTT Command: " + method + " = " + String(param));
+
+  if (method == "setButton" && param == true) {
+    sendPhoto();
+  } else if (method == "openGate" && param == true) {
+    gateServo.write(0);
+  } else if (method == "closeGate" && param == true) {
+    gateServo.write(90);  // Close and stay closed
+  }
+}
+
+
+void reconnectMqtt() {
+  while (!mqttClient.connected()) {
+    if (mqttClient.connect("ESP32-CAM", tbToken, nullptr)) {
+      mqttClient.subscribe("v1/devices/me/rpc/request/+");
+      Serial.println("✅ Connected to ThingsBoard MQTT");
+    } else {
+      Serial.print(".");
+      delay(2000);
+    }
+  }
+}
 
 void setup() {
   // Disable brownout detector
@@ -135,6 +194,10 @@ void setup() {
   Serial.println(WiFi.localIP());
 
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+  // Configure MQTT
+  mqttClient.setServer(tbHost, mqttPort);
+  mqttClient.setCallback(handleMqttCommands);
 
   // Configure camera
   camera_config_t config;
@@ -182,7 +245,11 @@ void setup() {
   gateServo.attach(servoPin, 500, 2400); // Pulse width range (in microseconds)
   gateServo.write(90); // Start at 90 degrees
 }
+
 void loop() {
+  if (!mqttClient.connected()) reconnectMqtt();
+  mqttClient.loop();
+
   bool buttonState = digitalRead(triggerButton);
 
   // Check if trigger button is pressed
@@ -275,6 +342,7 @@ int sendPhoto() {
     Serial.print("ImageLink: ");
     Serial.println(imageLink);
     sendPlateToFirebase(NPRData);
+    sendPlateNumber(NPRData);
     checkBooking(NPRData);
     client.stop();
     esp_camera_fb_return(fb);
@@ -366,4 +434,18 @@ void openGate() {
   gateServo.write(0);    
   delay(3000);             
   gateServo.write(90);     
+}
+
+void sendPlateNumber(String plate) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = "http://thingsboard.cloud/api/v1/" + String(tbToken) + "/telemetry";
+    http.begin(espClient, url);
+    http.addHeader("Content-Type", "application/json");
+
+    String payload = "{\"plateNumber\":\"" + plate + "\"}";
+    int code = http.POST(payload);
+    Serial.println("Sent plate. HTTP code: " + String(code));
+    http.end();
+  }
 }
