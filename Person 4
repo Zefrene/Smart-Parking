@@ -5,6 +5,8 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include "esp_camera.h"
+#include "time.h"
+#include <ArduinoJson.h>
 
 const char* ssid = "Galaxy A34";         // Replace "xxx" with your WiFi SSID
 const char* password = "*********";     // Replace "xxx" with your WiFi Password
@@ -19,6 +21,19 @@ const char* firebaseAuth = "AIzaSyDPphCm-HiZp5UDYlh2x5GBAPdDQDzQxc8";  // Use Da
 
 // Firebase path
 String firebasePath = "/Parking/ReservedRegion/PlateDetected.json";
+
+//NTP Server Configuration
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 8 * 3600; // GMT+8 for Malaysia
+const int daylightOffset_sec = 0;
+
+// Time slots
+const char* timeSlots[] = {
+  "12AM-1AM", "1AM-2AM", "2AM-3AM", "3AM-4AM", "4AM-5AM", "5AM-6AM",
+  "6AM-7AM", "7AM-8AM", "8AM-9AM", "9AM-10AM", "10AM-11AM", "11AM-12PM",
+  "12PM-1PM", "1PM-2PM", "2PM-3PM", "3PM-4PM", "4PM-5PM", "5PM-6PM",
+  "6PM-7PM", "7PM-8PM", "8PM-9PM", "9PM-10PM", "10PM-11PM", "11PM-12AM"
+};
 
 #define triggerButton 13  // GPIO pin for the trigger button
 #define flashLight 4      // GPIO pin for the flashlight
@@ -113,6 +128,9 @@ void setup() {
   Serial.println();
   Serial.print("ESP32-CAM IP Address: ");
   Serial.println(WiFi.localIP());
+
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
   // Configure camera
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -241,6 +259,7 @@ int sendPhoto() {
     Serial.print("ImageLink: ");
     Serial.println(imageLink);
     sendPlateToFirebase(NPRData);
+    checkBooking(NPRData);
     client.stop();
     esp_camera_fb_return(fb);
     return 0;
@@ -248,5 +267,118 @@ int sendPhoto() {
     Serial.println("Connection to server failed");
     esp_camera_fb_return(fb);
     return -2;
+  }
+}
+
+void checkBooking(String detectedPlate) {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("❌ Failed to get local time");
+    return;
+  }
+
+  char timeString[30];
+  strftime(timeString, sizeof(timeString), "%Y-%m-%d %H:%M:%S", &timeinfo);
+  Serial.print("🕒 Current Time: ");
+  Serial.println(timeString);
+
+
+  char currentDate[11];
+  strftime(currentDate, sizeof(currentDate), "%Y-%m-%d", &timeinfo);
+  int hour = timeinfo.tm_hour;
+  String currentSlot = String(timeSlots[hour]);
+
+  // Print current date and time slot
+  Serial.print("📅 Current Date: ");
+  Serial.println(currentDate);
+  Serial.print("⏰ Current Time Slot: ");
+  Serial.println(currentSlot);
+
+  // Construct Firebase URL
+  String path = "/Parking/ReservedRegion/Bookings/" + String(currentDate) + "/" + currentSlot + "/CarPlates.json?auth=" + firebaseAuth;
+
+  WiFiClientSecure client;
+  client.setInsecure();  // Use only in trusted environments
+
+  if (!client.connect(firebaseHost, 443)) {
+    Serial.println("❌ Firebase connection failed");
+    return;
+  }
+
+  client.println("GET " + path + " HTTP/1.1");
+  client.println("Host: " + String(firebaseHost));
+  client.println("Connection: close");
+  client.println();
+
+  // Skip HTTP headers
+  while (client.connected()) {
+    String line = client.readStringUntil('\n');
+    if (line == "\r") break;
+  }
+
+  // Read body
+  String response;
+  while (client.available()) {
+    response += client.readStringUntil('\n');
+  }
+
+  client.stop();
+  Serial.println("🔥 RAW JSON Response:");
+  Serial.println(response);
+  // Parse JSON response
+  DynamicJsonDocument doc(1024);
+  DeserializationError error = deserializeJson(doc, response);
+  if (error) {
+    Serial.print("JSON parsing failed: ");
+    Serial.println(error.c_str());
+    return;
+  }
+
+  Serial.println("📋 Testing direct access to specific plate:");
+
+if (doc.containsKey("0")) {
+  String testPlate = doc["0"].as<String>();
+  Serial.println("Plate at index 0: " + testPlate);
+} else {
+  Serial.println("Key '0' not found in the JSON!");
+}
+
+  // ✅ ADD THIS BLOCK HERE
+  if (doc.isNull()) {
+  Serial.println("⚠️ No bookings found for this time slot.");
+  return;
+  }
+
+  // Print detected plate
+  Serial.print("🔍 Detected Plate: ");
+  Serial.println(detectedPlate);
+
+  
+  // Compare plate
+  bool matchFound = false;
+
+  Serial.println("📋 Booked Plates:");
+
+  JsonArray platesArray = doc.as<JsonArray>();
+
+  for (String bookedPlate : platesArray) {
+  Serial.print(" - ");
+  Serial.print(bookedPlate);
+
+  if (bookedPlate.equalsIgnoreCase(detectedPlate)) {
+    Serial.println(" ✅ Match Found");
+    matchFound = true;
+  } else {
+    Serial.println(" ❌ No Match");
+  }
+  }
+
+
+  if (matchFound) {
+    Serial.println("✅ Car plate MATCHES current booking");
+    // You can trigger servo/gate here
+  } else {
+    Serial.println("❌ Car plate does NOT match current booking");
+    // Optional: deny entry or log attempt
   }
 }
