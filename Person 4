@@ -6,13 +6,14 @@
 #include "esp_camera.h"
 #include "time.h"
 #include <ArduinoJson.h>
+#include <ESP32Servo.h>
 
 const char* ssid = "Galaxy A34";         // Replace "xxx" with your WiFi SSID
 const char* password = "*********";     // Replace "xxx" with your WiFi Password
 String serverName = "www.circuitdigest.cloud";  // Replace with your server domain
 String serverPath = "/readnumberplate";              // API endpoint path "/readqrcode" "/readnumberplate"
 const int serverPort = 443;                     // HTTPS port
-String apiKey = "PcqHlC7tsAtD";             // Replace "xxx" with your API key
+String apiKey = "8HCjViTFqEZT";             // Replace "xxx" with your API key
 
 // Firebase Configuration
 const char* firebaseHost = "iot-smart-parking-45de5-default-rtdb.firebaseio.com";  // Without "https://"
@@ -34,7 +35,12 @@ const char* timeSlots[] = {
   "6PM-7PM", "7PM-8PM", "8PM-9PM", "9PM-10PM", "10PM-11PM", "11PM-12AM"
 };
 
-#define triggerButton 13  // GPIO pin for the trigger button
+#define triggerButton 14  // GPIO pin for the trigger button
+bool buttonPreviouslyPressed = false;
+
+const int servoPin = 13;      // Servo signal pin
+Servo gateServo;
+
 #define flashLight 4      // GPIO pin for the flashlight
 int count = 0;           // Counter for image uploads
 WiFiClientSecure client; // Secure client for HTTPS communication
@@ -170,11 +176,18 @@ void setup() {
     delay(1000);
     ESP.restart();
   }
+
+  // Initialize Servo Motor
+  gateServo.setPeriodHertz(50);    // Standard 50Hz for servo
+  gateServo.attach(servoPin, 500, 2400); // Pulse width range (in microseconds)
+  gateServo.write(90); // Start at 90 degrees
 }
 void loop() {
+  bool buttonState = digitalRead(triggerButton);
+
   // Check if trigger button is pressed
-      digitalWrite(triggerButton, HIGH);
-  if (digitalRead(triggerButton) == HIGH) {
+  if (buttonState == HIGH && !buttonPreviouslyPressed) {
+    buttonPreviouslyPressed = true;
     int status = sendPhoto();
     if (status == -1) {
       Serial.println("Image Capture Failed");
@@ -182,8 +195,12 @@ void loop() {
       Serial.println("Server Connection Failed");
     }
   }
-  delay(10000);
+
+  if (buttonState == LOW && buttonPreviouslyPressed) {
+    buttonPreviouslyPressed = false;
+  }
 }
+
 
 // Function to capture and send photo to the server
 int sendPhoto() {
@@ -337,9 +354,16 @@ void checkBooking(String detectedPlate) {
 
   if (matchFound) {
     Serial.println("✅ Car plate MATCHES current booking");
+    openGate();
     // You can trigger servo/gate here
   } else {
     Serial.println("❌ Car plate does NOT match current booking");
     // Optional: deny entry or log attempt
   }
+}
+
+void openGate() {
+  gateServo.write(0);    
+  delay(3000);             
+  gateServo.write(90);     
 }
