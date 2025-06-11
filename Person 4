@@ -1,4 +1,3 @@
-
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -277,22 +276,10 @@ void checkBooking(String detectedPlate) {
     return;
   }
 
-  char timeString[30];
-  strftime(timeString, sizeof(timeString), "%Y-%m-%d %H:%M:%S", &timeinfo);
-  Serial.print("🕒 Current Time: ");
-  Serial.println(timeString);
-
-
   char currentDate[11];
   strftime(currentDate, sizeof(currentDate), "%Y-%m-%d", &timeinfo);
   int hour = timeinfo.tm_hour;
   String currentSlot = String(timeSlots[hour]);
-
-  // Print current date and time slot
-  Serial.print("📅 Current Date: ");
-  Serial.println(currentDate);
-  Serial.print("⏰ Current Time Slot: ");
-  Serial.println(currentSlot);
 
   // Construct Firebase URL
   String path = "/Parking/ReservedRegion/Bookings/" + String(currentDate) + "/" + currentSlot + "/CarPlates.json?auth=" + firebaseAuth;
@@ -323,8 +310,7 @@ void checkBooking(String detectedPlate) {
   }
 
   client.stop();
-  Serial.println("🔥 RAW JSON Response:");
-  Serial.println(response);
+
   // Parse JSON response
   DynamicJsonDocument doc(1024);
   DeserializationError error = deserializeJson(doc, response);
@@ -334,37 +320,13 @@ void checkBooking(String detectedPlate) {
     return;
   }
 
-  Serial.println("📋 Testing direct access to specific plate:");
-
-if (doc.containsKey("0")) {
-  String testPlate = doc["0"].as<String>();
-  Serial.println("Plate at index 0: " + testPlate);
-} else {
-  Serial.println("Key '0' not found in the JSON!");
-}
-
-  // ✅ ADD THIS BLOCK HERE
-  if (doc.isNull()) {
-  Serial.println("⚠️ No bookings found for this time slot.");
-  return;
-  }
-
-  // Print detected plate
-  Serial.print("🔍 Detected Plate: ");
-  Serial.println(detectedPlate);
-
-  
   // Compare plate
   bool matchFound = false;
-
   Serial.println("📋 Booked Plates:");
-
   JsonArray platesArray = doc.as<JsonArray>();
-
   for (String bookedPlate : platesArray) {
   Serial.print(" - ");
   Serial.print(bookedPlate);
-
   if (bookedPlate.equalsIgnoreCase(detectedPlate)) {
     Serial.println(" ✅ Match Found");
     matchFound = true;
@@ -372,7 +334,6 @@ if (doc.containsKey("0")) {
     Serial.println(" ❌ No Match");
   }
   }
-
 
   if (matchFound) {
     Serial.println("✅ Car plate MATCHES current booking");
