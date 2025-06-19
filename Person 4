@@ -1,0 +1,451 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
+#include "esp_camera.h"
+#include "time.h"
+#include <ArduinoJson.h>
+#include <ESP32Servo.h>
+#include <PubSubClient.h>
+
+
+const char* ssid = "Galaxy A34";         // Replace "xxx" with your WiFi SSID
+const char* password = "*********";     // Replace "xxx" with your WiFi Password
+String serverName = "www.circuitdigest.cloud";  // Replace with your server domain
+String serverPath = "/readnumberplate";              // API endpoint path "/readqrcode" "/readnumberplate"
+const int serverPort = 443;                     // HTTPS port
+String apiKey = "8HCjViTFqEZT";             // Replace "xxx" with your API key
+
+// Firebase Configuration
+const char* firebaseHost = "iot-smart-parking-45de5-default-rtdb.firebaseio.com";  // Without "https://"
+const char* firebaseAuth = "AIzaSyDPphCm-HiZp5UDYlh2x5GBAPdDQDzQxc8";  // Use Database Secret for Admin access
+String firebasePath = "/Parking/ReservedRegion/PlateDetected.json";
+
+// --- ThingsBoard ---
+const char* tbHost = "thingsboard.cloud";
+const char* tbToken = "HfDMuUqPQKWnqxI02Vhc";
+const int mqttPort = 1883;
+
+// MQTT
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+WiFiClientSecure client; // Secure client for HTTPS communication
+
+//NTP Server Configuration
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 8 * 3600; // GMT+8 for Malaysia
+const int daylightOffset_sec = 0;
+
+// Time slots
+const char* timeSlots[] = {
+  "12AM-1AM", "1AM-2AM", "2AM-3AM", "3AM-4AM", "4AM-5AM", "5AM-6AM",
+  "6AM-7AM", "7AM-8AM", "8AM-9AM", "9AM-10AM", "10AM-11AM", "11AM-12PM",
+  "12PM-1PM", "1PM-2PM", "2PM-3PM", "3PM-4PM", "4PM-5PM", "5PM-6PM",
+  "6PM-7PM", "7PM-8PM", "8PM-9PM", "9PM-10PM", "10PM-11PM", "11PM-12AM"
+};
+
+#define triggerButton 14  // GPIO pin for the trigger button
+bool buttonPreviouslyPressed = false;
+
+const int servoPin = 13;      // Servo signal pin
+Servo gateServo;
+
+#define flashLight 4      // GPIO pin for the flashlight
+int count = 0;           // Counter for image uploads
+
+// Camera GPIO pins - adjust based on your ESP32-CAM board
+#define PWDN_GPIO_NUM 32
+#define RESET_GPIO_NUM -1
+#define XCLK_GPIO_NUM 0
+#define SIOD_GPIO_NUM 26
+#define SIOC_GPIO_NUM 27
+#define Y9_GPIO_NUM 35
+#define Y8_GPIO_NUM 34
+#define Y7_GPIO_NUM 39
+#define Y6_GPIO_NUM 36
+#define Y5_GPIO_NUM 21
+#define Y4_GPIO_NUM 19
+#define Y3_GPIO_NUM 18
+#define Y2_GPIO_NUM 5
+#define VSYNC_GPIO_NUM 25
+#define HREF_GPIO_NUM 23
+#define PCLK_GPIO_NUM 22
+
+// Function to extract a JSON string value by key
+String extractJsonStringValue(const String& jsonString, const String& key) {
+  int keyIndex = jsonString.indexOf(key);
+  if (keyIndex == -1) {
+    return "";
+  }
+  int startIndex = jsonString.indexOf(':', keyIndex) + 2;
+  int endIndex = jsonString.indexOf('"', startIndex);
+  if (startIndex == -1 || endIndex == -1) {
+    return "";
+  }
+  return jsonString.substring(startIndex, endIndex);
+}
+
+void sendPlateToFirebase(const String& plateNumber) {
+  WiFiClientSecure firebaseClient;
+  firebaseClient.setInsecure();  // No certificate validation
+
+  Serial.println("Connecting to Firebase...");
+  if (!firebaseClient.connect(firebaseHost, 443)) {
+    Serial.println("Firebase connection failed");
+    return;
+  }
+
+  String url = firebasePath + "?auth=" + firebaseAuth;
+  String data = "\"" + plateNumber + "\"";  // JSON string value
+
+  // Build HTTP request
+  firebaseClient.println("PUT " + url + " HTTP/1.1");
+  firebaseClient.println("Host: " + String(firebaseHost));
+  firebaseClient.println("Content-Type: application/json");
+  firebaseClient.println("Content-Length: " + String(data.length()));
+  firebaseClient.println();
+  firebaseClient.print(data);
+
+  Serial.println("Firebase request sent");
+
+  // Wait for response (optional debug)
+  while (firebaseClient.connected()) {
+    String line = firebaseClient.readStringUntil('\n');
+    if (line == "\r") break;
+  }
+
+  String response = firebaseClient.readString();
+  Serial.println("Firebase response:");
+  Serial.println(response);
+
+  firebaseClient.stop();
+}
+
+void sendPlateToThingsBoard(const String& plate) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = "http://" + String(tbHost) + "/api/v1/" + tbToken + "/telemetry";
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    String payload = "{\"plateNumber\":\"" + plate + "\"}";
+    int httpCode = http.POST(payload);
+    Serial.println("Sent to ThingsBoard. Response: " + String(httpCode));
+    http.end();
+  }
+}
+
+void handleMqttCommands(char* topic, byte* payload, unsigned int length) {
+  StaticJsonDocument<256> json;
+  DeserializationError error = deserializeJson(json, payload, length);
+
+  if (error) {
+    Serial.println("❌ Failed to parse MQTT command");
+    return;
+  }
+
+  String method = json["method"];
+  bool param = json["params"];
+
+  Serial.println("🔔 MQTT Command: " + method + " = " + String(param));
+
+  if (method == "setButton" && param == true) {
+    sendPhoto();
+  } else if (method == "openGate" && param == true) {
+    gateServo.write(0);
+  } else if (method == "closeGate" && param == true) {
+    gateServo.write(90);  // Close and stay closed
+  }
+}
+
+
+void reconnectMqtt() {
+  while (!mqttClient.connected()) {
+    if (mqttClient.connect("ESP32-CAM", tbToken, nullptr)) {
+      mqttClient.subscribe("v1/devices/me/rpc/request/+");
+      Serial.println("✅ Connected to ThingsBoard MQTT");
+    } else {
+      Serial.print(".");
+      delay(2000);
+    }
+  }
+}
+
+void setup() {
+  // Disable brownout detector
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+  Serial.begin(115200);
+  pinMode(flashLight, OUTPUT);
+  pinMode(triggerButton, INPUT);
+  digitalWrite(flashLight, LOW);
+  // Connect to WiFi
+  WiFi.mode(WIFI_STA);
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println();
+  Serial.print("ESP32-CAM IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+  // Configure MQTT
+  mqttClient.setServer(tbHost, mqttPort);
+  mqttClient.setCallback(handleMqttCommands);
+
+  // Configure camera
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+  // Adjust frame size and quality based on PSRAM availability
+  if (psramFound()) {
+    config.frame_size = FRAMESIZE_SVGA;
+    config.jpeg_quality = 5;  // Lower number means higher quality (0-63)
+    config.fb_count = 2;
+    Serial.println("PSRAM found");
+  } else {
+    config.frame_size = FRAMESIZE_CIF;
+    config.jpeg_quality = 12;  // Lower number means higher quality (0-63)
+    config.fb_count = 1;
+  }
+  // Initialize camera
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x", err);
+    delay(1000);
+    ESP.restart();
+  }
+
+  // Initialize Servo Motor
+  gateServo.setPeriodHertz(50);    // Standard 50Hz for servo
+  gateServo.attach(servoPin, 500, 2400); // Pulse width range (in microseconds)
+  gateServo.write(90); // Start at 90 degrees
+}
+
+void loop() {
+  if (!mqttClient.connected()) reconnectMqtt();
+  mqttClient.loop();
+
+  bool buttonState = digitalRead(triggerButton);
+
+  // Check if trigger button is pressed
+  if (buttonState == HIGH && !buttonPreviouslyPressed) {
+    buttonPreviouslyPressed = true;
+    int status = sendPhoto();
+    if (status == -1) {
+      Serial.println("Image Capture Failed");
+    } else if (status == -2) {
+      Serial.println("Server Connection Failed");
+    }
+  }
+
+  if (buttonState == LOW && buttonPreviouslyPressed) {
+    buttonPreviouslyPressed = false;
+  }
+}
+
+
+// Function to capture and send photo to the server
+int sendPhoto() {
+  camera_fb_t* fb = NULL;
+  // Turn on flash light and capture image
+  // digitalWrite(flashLight, HIGH);
+  delay(100);
+  fb = esp_camera_fb_get();
+  delay(100);
+  if (!fb) {
+    Serial.println("Camera capture failed");
+    return -1;
+  }
+  // Display success message
+  Serial.println("Image Capture Success");
+  delay(300);
+  // digitalWrite(flashLight, LOW);
+  // Connect to server
+  Serial.println("Connecting to server:" + serverName);
+  client.setInsecure();  // Skip certificate validation for simplicity
+  if (client.connect(serverName.c_str(), serverPort)) {
+    Serial.println("Connection successful!");
+    delay(300);
+    Serial.println("Data Uploading !");
+    // Increment count and prepare file name
+    count++;
+    Serial.println(count);
+    String filename = apiKey + ".jpeg";
+    // Prepare HTTP POST request
+    String head = "--CircuitDigest\r\nContent-Disposition: form-data; name=\"imageFile\"; filename=\"" + filename + "\"\r\nContent-Type: image/jpeg\r\n\r\n";
+    String tail = "\r\n--CircuitDigest--\r\n";
+    uint32_t imageLen = fb->len;
+    uint32_t extraLen = head.length() + tail.length();
+    uint32_t totalLen = imageLen + extraLen;
+    client.println("POST " + serverPath + " HTTP/1.1");
+    client.println("Host: " + serverName);
+    client.println("Content-Length: " + String(totalLen));
+    client.println("Content-Type: multipart/form-data; boundary=CircuitDigest");
+    client.println("Authorization:" + apiKey);
+    client.println();
+    client.print(head);
+    // Send image data in chunks
+    uint8_t* fbBuf = fb->buf;
+    size_t fbLen = fb->len;
+    for (size_t n = 0; n < fbLen; n += 1024) {
+      if (n + 1024 < fbLen) {
+        client.write(fbBuf, 1024);
+        fbBuf += 1024;
+      } else {
+        size_t remainder = fbLen % 1024;
+        client.write(fbBuf, remainder);
+      }
+    }
+    client.print(tail);
+    // Clean up
+    esp_camera_fb_return(fb);
+    Serial.println("Waiting For Response!");
+    // Wait for server response
+    String response;
+    long startTime = millis();
+    while (client.connected() && millis() - startTime < 5000) { // Modifify the Waiting time as per the response time
+      if (client.available()) {
+        char c = client.read();
+        response += c;
+      }
+    }
+    // Extract and display NPR data from response
+    String NPRData = extractJsonStringValue(response, "\"number_plate\"");
+    String imageLink = extractJsonStringValue(response, "\"view_image\"");
+    Serial.print("NPR DATA: ");
+    Serial.println(NPRData);
+    Serial.print("ImageLink: ");
+    Serial.println(imageLink);
+    sendPlateToFirebase(NPRData);
+    sendPlateNumber(NPRData);
+    checkBooking(NPRData);
+    client.stop();
+    esp_camera_fb_return(fb);
+    return 0;
+  } else {
+    Serial.println("Connection to server failed");
+    esp_camera_fb_return(fb);
+    return -2;
+  }
+}
+
+void checkBooking(String detectedPlate) {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("❌ Failed to get local time");
+    return;
+  }
+
+  char currentDate[11];
+  strftime(currentDate, sizeof(currentDate), "%Y-%m-%d", &timeinfo);
+  int hour = timeinfo.tm_hour;
+  String currentSlot = String(timeSlots[hour]);
+
+  // Construct Firebase URL
+  String path = "/Parking/ReservedRegion/Bookings/" + String(currentDate) + "/" + currentSlot + "/CarPlates.json?auth=" + firebaseAuth;
+
+  WiFiClientSecure client;
+  client.setInsecure();  // Use only in trusted environments
+
+  if (!client.connect(firebaseHost, 443)) {
+    Serial.println("❌ Firebase connection failed");
+    return;
+  }
+
+  client.println("GET " + path + " HTTP/1.1");
+  client.println("Host: " + String(firebaseHost));
+  client.println("Connection: close");
+  client.println();
+
+  // Skip HTTP headers
+  while (client.connected()) {
+    String line = client.readStringUntil('\n');
+    if (line == "\r") break;
+  }
+
+  // Read body
+  String response;
+  while (client.available()) {
+    response += client.readStringUntil('\n');
+  }
+
+  client.stop();
+
+  // Parse JSON response
+  DynamicJsonDocument doc(1024);
+  DeserializationError error = deserializeJson(doc, response);
+  if (error) {
+    Serial.print("JSON parsing failed: ");
+    Serial.println(error.c_str());
+    return;
+  }
+
+  // Compare plate
+  bool matchFound = false;
+  Serial.println("📋 Booked Plates:");
+  JsonArray platesArray = doc.as<JsonArray>();
+  for (String bookedPlate : platesArray) {
+  Serial.print(" - ");
+  Serial.print(bookedPlate);
+  if (bookedPlate.equalsIgnoreCase(detectedPlate)) {
+    Serial.println(" ✅ Match Found");
+    matchFound = true;
+  } else {
+    Serial.println(" ❌ No Match");
+  }
+  }
+
+  if (matchFound) {
+    Serial.println("✅ Car plate MATCHES current booking");
+    openGate();
+    // You can trigger servo/gate here
+  } else {
+    Serial.println("❌ Car plate does NOT match current booking");
+    // Optional: deny entry or log attempt
+  }
+}
+
+void openGate() {
+  gateServo.write(0);    
+  delay(3000);             
+  gateServo.write(90);     
+}
+
+void sendPlateNumber(String plate) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = "http://thingsboard.cloud/api/v1/" + String(tbToken) + "/telemetry";
+    http.begin(espClient, url);
+    http.addHeader("Content-Type", "application/json");
+
+    String payload = "{\"plateNumber\":\"" + plate + "\"}";
+    int code = http.POST(payload);
+    Serial.println("Sent plate. HTTP code: " + String(code));
+    http.end();
+  }
+}
