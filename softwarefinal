@@ -28,7 +28,8 @@ const char* token = "SGFN7uIb6klnaFoGXk3L";
 
 // ---------- Global Objects ----------
 WiFiClient espClient; 
-PubSubClient client(espClient); LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLS, LCD_ROWS);
+PubSubClient client(espClient); 
+LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLS, LCD_ROWS);
 
 // ---------- Global Variables ----------
 int region_A = MAX_SLOTS, region_B = MAX_SLOTS, smokeValue = 0;
@@ -43,12 +44,20 @@ unsigned long lastTelemetryTime = 0; // <<< NEW
 
 void setup() {
   Serial.begin(115200);
-  pinMode(IR_SENSOR_A_IN, INPUT); pinMode(IR_SENSOR_A_OUT, INPUT);
-  pinMode(IR_SENSOR_B_IN, INPUT); pinMode(IR_SENSOR_B_OUT, INPUT);
-  pinMode(BUZZER_PIN, OUTPUT); digitalWrite(BUZZER_PIN, HIGH);
-  lcd.init(); lcd.backlight();
-  lcd.setCursor(0, 0); lcd.print("Parking System"); lcd.setCursor(0, 1); lcd.print("Connecting...");
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD); client.setServer(mqttServer, mqttPort);
+  pinMode(IR_SENSOR_A_IN, INPUT); 
+  pinMode(IR_SENSOR_A_OUT, INPUT);
+  pinMode(IR_SENSOR_B_IN, INPUT);
+  pinMode(IR_SENSOR_B_OUT, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT); 
+  digitalWrite(BUZZER_PIN, HIGH);
+  lcd.init(); 
+  lcd.backlight();
+  lcd.setCursor(0, 0); 
+  lcd.print("Parking System"); 
+  lcd.setCursor(0, 1); 
+  lcd.print("Connecting...");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD); 
+  client.setServer(mqttServer, mqttPort);
 }
 
 void loop() {
@@ -90,11 +99,18 @@ void updateLCD() {
     lcd.clear();
     lcd.setCursor(0, 0);
     if (region_A == 0) lcd.print("Zone A: FULL");
-    else { lcd.print("Zone A: "); lcd.print(region_A); lcd.print(" Left"); }
+    else { 
+      lcd.print("Zone A: "); 
+      lcd.print(region_A); 
+      lcd.print(" Left"); 
+    }
     lcd.setCursor(0, 1);
     if (region_B == 0) lcd.print("Zone B: FULL");
-    else { lcd.print("Zone B: "); lcd.print(region_B); lcd.print(" Left"); }
-    lastLcdUpdateTime = millis();
+    else { 
+      lcd.print("Zone B: "); 
+      lcd.print(region_B); 
+      lcd.print(" Left"); }
+      lastLcdUpdateTime = millis();
   }
 }
 
@@ -106,19 +122,35 @@ bool checkAllSensors() {
   smokeValue = analogRead(MQ2_SENSOR);
 
   if ((currentAIn == IR_DETECTED) && (lastAIn != IR_DETECTED) && (currentTime-lastDetectTimeA_In > DEBOUNCE_DELAY)) {
-    if (region_A > 0) { region_A--; updateNeeded = true; Serial.println("🚗 In A"); }
+    if (region_A > 0) { 
+      region_A--; 
+      updateNeeded = true; 
+      Serial.println("🚗 In A"); 
+    }
     lastDetectTimeA_In = currentTime;
   }
   if ((currentAOut == IR_DETECTED) && (lastAOut != IR_DETECTED) && (currentTime-lastDetectTimeA_Out > DEBOUNCE_DELAY)) {
-    if (region_A < MAX_SLOTS) { region_A++; updateNeeded = true; Serial.println("🚙 Out A"); }
+    if (region_A < MAX_SLOTS) { 
+      region_A++; 
+      updateNeeded = true; 
+      Serial.println("🚙 Out A");
+    }
     lastDetectTimeA_Out = currentTime;
   }
   if ((currentBIn == IR_DETECTED) && (lastBIn != IR_DETECTED) && (currentTime-lastDetectTimeB_In > DEBOUNCE_DELAY)) {
-    if (region_B > 0) { region_B--; updateNeeded = true; Serial.println("🚗 In B"); }
+    if (region_B > 0) { 
+      region_B--; 
+      updateNeeded = true; 
+      Serial.println("🚗 In B"); 
+    }
     lastDetectTimeB_In = currentTime;
   }
   if ((currentBOut == IR_DETECTED) && (lastBOut != IR_DETECTED) && (currentTime-lastDetectTimeB_Out > DEBOUNCE_DELAY)) {
-    if (region_B < MAX_SLOTS) { region_B++; updateNeeded = true; Serial.println("🚙 Out B"); }
+    if (region_B < MAX_SLOTS) { 
+      region_B++; 
+      updateNeeded = true; 
+      Serial.println("🚙 Out B"); 
+    }
     lastDetectTimeB_Out = currentTime;
   }
 
@@ -136,7 +168,10 @@ bool checkAllSensors() {
     smokeAlarmActive = false;
   }
   
-  lastAIn = currentAIn; lastAOut = currentAOut; lastBIn = currentBIn; lastBOut = currentBOut;
+  lastAIn = currentAIn; 
+  lastAOut = currentAOut; 
+  lastBIn = currentBIn; 
+  lastBOut = currentBOut;
   return updateNeeded;
 }
 
